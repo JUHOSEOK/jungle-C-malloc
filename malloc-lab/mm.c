@@ -63,8 +63,19 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
+// explict list 구현 매크로 
+#define PTRSIZE sizeof(void *)
+#define PRED(bp) (*(void **)(bp))
+#define SUCC(bp) (*(void **)((char *)(bp) + PTRSIZE))
+#define MINBLOCKSIZE (2 * WSIZE + 2 * PTRSIZE)
+
+
+
 static char *heap_listp;
-static char *rover;
+
+// explict list 구현 매크로 
+static void *free_listp;
+
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
@@ -73,35 +84,58 @@ static void place(void *bp, size_t asize);
 static size_t adjust_block_size(size_t size);
 static int can_expand_into_next(void *bp, size_t asize);
 static void expand_into_next(void *bp, size_t asize);
+static void insert_free_block(void *bp);
+static void remove_free_block(void *bp);
+
 
 /*
  * mm_init - malloc 패키지를 초기화한다.
  */
+// int mm_init(void)
+// {
+//     // if (heap_listp = mem_sbrk(4 * WSIZE) == (void *)-1) {
+//     //     return -1;
+//     // }
+//     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
+//         return -1;
+//     }
+
+//     PUT(heap_listp, 0); // 패딩넣어줌 생성 
+//     PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 헤더 넣어줌
+//     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 푸터 넣어줌
+//     PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 에필로그 헤더 넣어줌
+//     heap_listp += (2 * WSIZE); // 페이로드 자리 옮겨줌 프롤로그 푸터 자리로 
+
+//     if (extend_heap(CHUNKSIZE / WSIZE) == NULL) { // 청크 사이즈 4096로 늘리는데 null이면 리턴함 
+//         return -1; 
+        
+//     }
+
+//     return 0;
+
+
+// }
+
+
 int mm_init(void)
 {
-    // if (heap_listp = mem_sbrk(4 * WSIZE) == (void *)-1) {
-    //     return -1;
-    // }
+    free_listp = NULL;
+
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
         return -1;
     }
 
-    PUT(heap_listp, 0); // 패딩넣어줌 생성 
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 헤더 넣어줌
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 푸터 넣어줌
-    PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 에필로그 헤더 넣어줌
-    heap_listp += (2 * WSIZE); // 페이로드 자리 옮겨줌 프롤로그 푸터 자리로 
+    PUT(heap_listp, 0);
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
+    heap_listp += (2 * WSIZE);
 
-    rover = heap_listp;
-
-    if (extend_heap(CHUNKSIZE / WSIZE) == NULL) { // 청크 사이즈 4096로 늘리는데 null이면 리턴함 
-        return -1; 
-        
+    if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
+        return -1;
     }
 
     return 0;
-
-
 }
 
 static void *extend_heap(size_t words) {
@@ -132,19 +166,22 @@ size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 size_t size = GET_SIZE(HDRP(bp));
 
 if (prev_alloc && next_alloc) {
-    return bp;
 } else if (prev_alloc && !next_alloc) {
+    remove_free_block(NEXT_BLKP(bp));
     size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
     PUT(HDRP(bp), PACK(size,0));
     PUT(FTRP(bp), PACK(size,0));
 
 } else if (!prev_alloc && next_alloc) {
+    remove_free_block(PREV_BLKP(bp));
     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
     bp = PREV_BLKP(bp);
     
 } else {
+    remove_free_block(PREV_BLKP(bp));
+    remove_free_block(NEXT_BLKP(bp));
     size += GET_SIZE(HDRP(PREV_BLKP(bp))) 
           + GET_SIZE(HDRP(NEXT_BLKP(bp)));
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
@@ -152,9 +189,7 @@ if (prev_alloc && next_alloc) {
     bp = PREV_BLKP(bp);
 }
 
-if ((rover > (char *)bp) && (rover < NEXT_BLKP(bp))) {
-    rover = bp;
-}
+insert_free_block(bp);
 
 return bp;
 }
@@ -164,14 +199,8 @@ static void *find_fit(size_t asize)
 {
     void *bp;
 
-    for (bp = rover; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            return bp;
-        }
-    }
-
-    for (bp = heap_listp; bp != rover; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+    for (bp = free_listp; bp != NULL; bp = SUCC(bp)) {
+        if (asize <= GET_SIZE(HDRP(bp))) {
             return bp;
         }
     }
@@ -234,18 +263,18 @@ static void place(void *bp, size_t asize) //
 {
     size_t csize = GET_SIZE(HDRP(bp));
 
+    remove_free_block(bp);
     
-    if ((csize - asize) >= (2 * DSIZE)) {
+    if ((csize - asize) >= MINBLOCKSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
-        rover = bp;
+        void *split_bp = NEXT_BLKP(bp);
+        PUT(HDRP(split_bp), PACK(csize - asize, 0));
+        PUT(FTRP(split_bp), PACK(csize - asize, 0));
+        insert_free_block(split_bp);
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        rover = NEXT_BLKP(bp);
     }
 }
 
@@ -287,7 +316,7 @@ void *mm_realloc(void *bp, size_t size)
 
         size_t remainder = oldsize - asize;
 
-        if (remainder >= 2 * DSIZE) {
+        if (remainder >= MINBLOCKSIZE) {
             
             PUT(HDRP(bp), PACK(asize, 1));
             PUT(FTRP(bp), PACK(asize, 1));
@@ -295,10 +324,6 @@ void *mm_realloc(void *bp, size_t size)
             void *split_bp = NEXT_BLKP(bp);
             PUT(HDRP(split_bp),  PACK(remainder, 0));
             PUT(FTRP(split_bp),  PACK(remainder, 0));
-
-            if ((rover > (char *)bp) && (rover < NEXT_BLKP(split_bp))) {
-                rover = split_bp;
-            }
 
             coalesce(split_bp);
         }
@@ -310,6 +335,19 @@ void *mm_realloc(void *bp, size_t size)
         expand_into_next(bp, asize);
         return bp; 
     }
+
+    char *next_blkp = NEXT_BLKP(bp);
+    if (GET_SIZE(HDRP(next_blkp)) == 0) {
+        size_t extend_size = asize - oldsize;
+
+    if (extend_heap(extend_size / WSIZE) == NULL) {
+        return NULL;
+    }
+    expand_into_next(bp, asize);
+    return bp;
+    }
+
+
 
     newptr = mm_malloc(size);
     if (newptr == NULL) {
@@ -330,7 +368,7 @@ static size_t adjust_block_size(size_t size) {
     
         // TODO size 사용자가 요청 한 크기가 8바이트(한블럭의 최소크기)라면 asize는 최소크기 16바이트 [(헤더 4) + 페이로드 (8) + 푸터(4)]
     if (size <= DSIZE) {
-        return 2 * DSIZE;
+        return MINBLOCKSIZE;
     }
     // TODO 아니면 size + 8의 배수로 보정한값 으로 asize 할당
     else {
@@ -369,9 +407,9 @@ static void expand_into_next(void *bp, size_t asize)
     size_t oldsize = GET_SIZE(HDRP(bp));
     size_t nextsize = GET_SIZE(HDRP(next_bp));
     size_t combined = oldsize + nextsize;
-    char *merged_end = (char *)bp + combined;
+    remove_free_block(next_bp);
 
-    if (combined - asize >= 2 * DSIZE) {
+    if (combined - asize >= MINBLOCKSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         // 변경: 요청 크기만큼 현재 블록을 확장해서 allocated로 유지
@@ -382,18 +420,40 @@ static void expand_into_next(void *bp, size_t asize)
         // 추가: 남는 공간이 충분하면 뒤를 다시 free block으로 남겨둠
         // 이유: utilization을 덜 해치기 위해
 
-        if ((rover > (char *)bp) && (rover < merged_end)) {
-            rover = split_bp;
-        }
+        insert_free_block(split_bp);
     }
     else {
         PUT(HDRP(bp), PACK(combined, 1));
         PUT(FTRP(bp), PACK(combined, 1));
         // 추가: 애매하게 남는 작은 조각은 split하지 않고 전부 현재 블록에 포함
         // 이유: 쓸모없는 작은 free block 생성을 막기 위해
+    }
+}
 
-        if ((rover > (char *)bp) && (rover < merged_end)) {
-            rover = bp;
-        }
+static void insert_free_block(void *bp)
+{
+    PRED(bp) = NULL;
+    SUCC(bp) = free_listp;
+
+    if (free_listp != NULL) {
+        PRED(free_listp) = bp;
+    }
+
+    free_listp = bp;
+}
+      
+static void remove_free_block(void *bp)
+{
+    void *pred = PRED(bp);
+    void *succ = SUCC(bp);
+
+    if (pred != NULL) {
+        SUCC(pred) = succ;
+    } else {
+        free_listp = succ;
+    }
+
+    if (succ != NULL) {
+        PRED(succ) = pred;
     }
 }
